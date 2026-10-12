@@ -1,9 +1,0 @@
-__pycache__/
-*.py[cod]
-*.png
-agentscribe-*
-slim-storage-state.json
-storage-state*.json
-session_cookies.*
-.env
-screenshots/
