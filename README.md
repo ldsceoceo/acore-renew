@@ -3,7 +3,8 @@
 续期页：`https://zero.acorehosting.com/dashboard`
 
 温馨提示：Acore 登录走 Discord OAuth，建议直接用 `session` Cookie 保活（录制确认），
-Cookie 失效时自动回退 Discord 账密登录。尽量使用干净点的节点，否则可能卡 Cloudflare 验证。
+Cookie 失效时自动回退 Discord Token 免密登录（localStorage 注入，不填密码、不过 hCaptcha）。
+尽量使用干净点的节点，否则可能卡 Cloudflare 验证。
 
 ## 续期原理（录制校准）
 
@@ -20,19 +21,21 @@ Cookie 失效时自动回退 Discord 账密登录。尽量使用干净点的节�
 | Secret 名称 | 是否必填 | 说明 | 示例 |
 |---|---|---|---|
 | `SESSION_COOKIE` | ✅二选一 | `session` Cookie 值（推荐，免过盾） | `eyJ1c2VyX2lkIjo...` |
-| `DC_EMAIL`       | ✅二选一 | Discord 登录邮箱（Cookie 失效时回退） | `you@example.com` |
-| `DC_PASSWORD`    | ✅二选一 | Discord 登录密码（Cookie 失效时回退） | `********` |
+| `DISCORD_TOKEN`  | ✅二选一 | Discord Token（Cookie 失效时回退，免密登录） | `mfa.abc...` |
 | `NODE_LINK`      | ❌可选 | 代理节点地址,例如:vless:// vmess:// trojan:// hysteria2:// anytls:// | |
 | `TG_BOT_TOKEN`   | ❌可选 | Telegram Bot Token | |
 | `TG_CHAT_ID`     | ❌可选 | Telegram Chat ID | |
 
-`SESSION_COOKIE` 二选一说明：配了它优先走 Cookie（快且免过盾）；不配则每次走 Discord 账密登录。
-Cookie 失效时若配了 Discord 账密会自动回退登录，两者都没配则直接报错退出。
+`SESSION_COOKIE` 二选一说明：配了它优先走 Cookie（快且免过盾）；不配则每次走 Discord Token 登录。
+Cookie 失效时若配了 Token 会自动回退登录，两者都没配则直接报错退出。
 
 `SESSION_COOKIE` 的获取（登录 dashboard 后 F12 或右键检查，选择 应用程序/存储，左边找到 Cookie，
-域名 `zero.acorehosting.com` 下复制 `session` 的值）：
+域名 `zero.acorehosting.com` 下复制 `session` 的值）。
 
-> ⚠️ Cookie 含登录态，视同密码，仅填 Secrets，切勿提交到仓库。
+`DISCORD_TOKEN` 的获取（登录 discord.com 后 F12，选择 应用程序/存储 → Local Storage →
+`https://discord.com` → 复制 `token` 的值，去掉首尾引号）：
+
+> ⚠️ Cookie 和 Token 都含登录态，视同密码，仅填 Secrets，切勿提交到仓库。
 
 ### 代理格式（确认在v2rayN里使用正常的节点）
 
@@ -51,7 +54,7 @@ Cookie 失效时若配了 Discord 账密会自动回退登录，两者都没配�
 ### GitHub Actions 运行步骤
 
 1. Fork 本仓库
-2. 在仓库 Secrets 中配置 `SESSION_COOKIE`（或 `DC_EMAIL` + `DC_PASSWORD`），（可选）配置 `TG_BOT_TOKEN`、`TG_CHAT_ID`、`NODE_LINK`
+2. 在仓库 Secrets 中配置 `SESSION_COOKIE`（或 `DISCORD_TOKEN`），（可选）配置 `TG_BOT_TOKEN`、`TG_CHAT_ID`、`NODE_LINK`
 3. Actions 菜单里手动触发 `workflow_dispatch` 先跑一次验证
 4. 定时任务已设为每天 UTC 10:10 自动巡检，未到续期时间会自动跳过
 

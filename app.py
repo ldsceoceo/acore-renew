@@ -15,7 +15,8 @@
                                                 └─ #resOk 显示成功 + a.btn 返回 dashboard
 
 认证：session-cookie，Cookie 名 `session`（域 zero.acorehosting.com，
-httpOnly）。登录优先级：SESSION_COOKIE → Discord 账密（DC_EMAIL/DC_PASSWORD）。
+httpOnly）。登录优先级：SESSION_COOKIE → Discord Token（DISCORD_TOKEN，
+localStorage 注入免密登录，不过 hCaptcha）。
 无 OTP、无 CSRF（录制 replay_hints 确认）。
 
 门控（先 HTTP 快捷路径，失败才开浏览器）：
@@ -38,8 +39,7 @@ except ImportError:
 
 # --- 环境变量 ---
 SESSION_COOKIE = os.environ.get('SESSION_COOKIE') or ""  # session Cookie 值，优先（录制确认名 `session`）
-DC_EMAIL     = os.environ.get('DC_EMAIL') or ""           # Discord 邮箱，Cookie 失效时回退
-DC_PASSWORD  = os.environ.get('DC_PASSWORD') or ""        # Discord 密码，Cookie 失效时回退
+DISCORD_TOKEN = os.environ.get('DISCORD_TOKEN') or ""     # Discord Token，Cookie 失效时回退（免密）
 TG_CHAT_ID   = os.environ.get('TG_CHAT_ID') or ""         # Telegram Chat ID,可选
 TG_BOT_TOKEN = os.environ.get('TG_BOT_TOKEN') or ""       # Telegram Bot Token,可选
 
@@ -101,15 +101,12 @@ def send_telegram_notification(status, old_due, new_due, current_ip="未知"):
 
     local_time = time.gmtime(time.time() + 8 * 3600)
     now = time.strftime("%Y-%m-%d %H:%M:%S", local_time)
-    account = DC_EMAIL or "Cookie登录"
-    if '@' in account:
-        name, domain = account.split('@', 1)
-        if len(name) > 4:
-            masked = f"{name[:2]}****{name[-2:]}@{domain}"
-        else:
-            masked = f"{name}@{domain}"
+    if DISCORD_TOKEN and len(DISCORD_TOKEN) > 6:
+        masked = f"Token {DISCORD_TOKEN[:6]}****"
+    elif DISCORD_TOKEN:
+        masked = "Token ****"
     else:
-        masked = account[:2] + '****' if len(account) > 2 else account
+        masked = "Cookie登录"
 
     text = (
         f"🎰 Acore 续期报告\n\n"
@@ -527,9 +524,9 @@ def login(page):
         except Exception as e:
             log(f"⚠️ Cookie 登录尝试异常: {e}")
 
-    # 2. Discord OAuth 回退
-    if not DC_EMAIL or not DC_PASSWORD:
-        log("❌ Cookie 失效且未配置 Discord 凭证")
+    # 2. Discord Token 回退
+    if not DISCORD_TOKEN:
+        log("❌ Cookie 失效且未配置 DISCORD_TOKEN")
         return False
     return _discord_login(page)
 
@@ -576,7 +573,12 @@ def _click_authorize_if_present(page):
         return False
 
 def _discord_login(page):
-    log("💣 尝试 Discord 登录...")
+    """Discord Token 免密登录：本站入口 → 授权页 → discord 域内注入 token →
+    @me 验有效性 → 回授权页点 Authorize → 导航验收。不填密码，不过 hCaptcha。"""
+    if not DISCORD_TOKEN:
+        log("❌ 未配置 DISCORD_TOKEN")
+        return False
+    log("💣 尝试 Discord Token 登录...")
     try:
         page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=60000)
         handle_cloudflare(page, timeout=240)
@@ -596,32 +598,55 @@ def _discord_login(page):
             log("✅ 已处于登录状态（免填表）")
             return True
 
-        log("⌨️ 输入 Discord 账号密码...")
-        email_input = page.locator('input[name="email"], input[type="email"], input[inputmode="email"]').first
-        pwd_input = page.locator('input[name="password"], input[type="password"]').first
+        # 记下 OAuth 授权地址（注入 token 后跳回来继续授权）
+        authorize_url = page.url or ""
+        if "discord.com" not in authorize_url:
+            time.sleep(3)
+            authorize_url = page.url or ""
+        log(f"🔗 授权页：{authorize_url[:120]}")
+
+        # 到 discord.com 域内注入 token（Discord 以 JSON 加引号形式存 token）
         try:
-            email_input.wait_for(state="visible", timeout=30000)
+            page.goto("https://discord.com/login", wait_until="domcontentloaded", timeout=60000)
         except Exception:
-            handle_cloudflare(page, timeout=120)
-            email_input.wait_for(state="visible", timeout=30000)
-
-        human_delay(3, 5)
-        email_input.fill(DC_EMAIL, timeout=10000)
-        time.sleep(random.uniform(0.6, 1.2))
-        pwd_input.fill(DC_PASSWORD, timeout=10000)
-        human_delay(3, 5)
-
-        # 注：Discord 侧可能是 hCaptcha（非 CF Turnstile），CF 函数管不到；
-        # 若卡验证会超时失败并截图，需人工看 login_fail.png。
+            pass
+        time.sleep(2)
         handle_cloudflare(page, timeout=60)
-
-        log("🖱️ 点击登录按钮提交...")
-        try:
-            page.click('button[type="submit"]', timeout=8000)
-        except Exception:
-            page.locator('button:has-text("Log In"), button:has-text("登录")').first.click(timeout=10000)
+        page.evaluate(
+            "(tok) => { localStorage.setItem('token', JSON.stringify(tok)); }",
+            DISCORD_TOKEN,
+        )
+        page.reload(wait_until="domcontentloaded", timeout=60000)
         time.sleep(3)
-        handle_cloudflare(page, timeout=240)
+
+        # 验 token：@me 能取到用户名才算有效
+        try:
+            username = page.evaluate(
+                """async (tok) => {
+                    try {
+                        const r = await fetch('https://discord.com/api/v9/users/@me', {
+                            headers: { authorization: tok }
+                        });
+                        if (!r.ok) return null;
+                        const j = await r.json();
+                        return j.global_name || j.username || 'unknown';
+                    } catch (e) { return null; }
+                }""",
+                DISCORD_TOKEN,
+            )
+        except Exception:
+            username = None
+        if not username:
+            log("❌ Discord Token 无效（@me 校验失败）。")
+            page.screenshot(path="login_fail.png")
+            return False
+        log(f"👤 Discord 用户: {username}")
+
+        # 回到授权页继续
+        if "oauth2/authorize" in authorize_url:
+            page.goto(authorize_url, wait_until="domcontentloaded", timeout=60000)
+            time.sleep(2)
+            handle_cloudflare(page, timeout=120)
 
         # 120s 导航验收：回到本站且不在 discord 即算回；中途遇授权页则点 Authorize
         nav_start = time.time()
@@ -793,9 +818,9 @@ def renew_service(page, old_expire):
 
 def main():
     log(f"🔍 凭证检测: SESSION_COOKIE={'已配置' if SESSION_COOKIE else '未配置'}, "
-        f"DC_EMAIL={'已配置' if DC_EMAIL else '未配置'}")
-    if not SESSION_COOKIE and not (DC_EMAIL and DC_PASSWORD):
-        log("❌ 缺少登录凭证（SESSION_COOKIE 或 Discord 账密二选一）")
+        f"DISCORD_TOKEN={'已配置' if DISCORD_TOKEN else '未配置'}")
+    if not SESSION_COOKIE and not DISCORD_TOKEN:
+        log("❌ 缺少登录凭证（SESSION_COOKIE 或 DISCORD_TOKEN 二选一）")
         sys.exit(1)
 
     if IS_PROXY:
