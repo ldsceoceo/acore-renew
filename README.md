@@ -8,11 +8,10 @@ Cookie 失效时自动回退 Discord Token 免密登录（localStorage 注入，
 
 ## 续期原理（录制校准）
 
-1. HTTP 快捷路径：requests 带 `session` Cookie 读 dashboard，有续期链接（`a.btn.btn-success[href*="/renew"]`）
-   则直接 `POST /renew/confirm?id=<uuid>`，返回 `{"ok":true,"expires_at":"..."}` 即成功，全程免开浏览器；
-2. 无续期链接（按钮 disabled）= 未到续期时间，直接退出；
-3. HTTP 被 CF 拦截或 Cookie 失效时，转浏览器全流程：patchright 真 Chrome 过盾 →
-   进 `/renew?id=` 页等页内 Turnstile 自动确认 → 等 `#resOk` 成功标识 → 以 Expires 时间差验收。
+纯浏览器链路（本站 CF 盾 100% 拦裸请求，无 HTTP 快捷路径）：patchright 真 Chrome 过盾 →
+session Cookie 登录（失效回退 Discord Token）→ dashboard 查续期链接（`a.btn.btn-success[href*="/renew"]`，
+无链接即按钮 disabled = 未到时间，直接退出）→ 进 `/renew?id=` 页等页内 Turnstile 自动确认 →
+等 `#resOk` 成功标识 → 以 Expires 时间差验收。登录成功后新 `session` 自动写回（本地 `.env` + 仓库 Secrets，需配 `GH_TOKEN`）。
 
 ## 配置
 

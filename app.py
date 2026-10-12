@@ -19,10 +19,9 @@ httpOnly）。登录优先级：SESSION_COOKIE → Discord Token（DISCORD_TOKEN
 localStorage 注入免密登录，不过 hCaptcha）。
 无 OTP、无 CSRF（录制 replay_hints 确认）。
 
-门控（先 HTTP 快捷路径，失败才开浏览器）：
-  1. requests 带 session Cookie GET dashboard → 无续期链接 = NOT_TIME（免浏览器）；
-  2. POST /renew/confirm?id= 返回 ok:true = SUCCESS（免浏览器）；
-  3. 上述任一步遇 CF 403 / 非 JSON / 会话失效 → 浏览器全流程兜底。
+门控（纯浏览器链路；HTTP 预检已砍：本站 CF 盾 100% 拦裸请求）：
+  dashboard 无续期链接（按钮 disabled）= NOT_TIME；
+  有链接则进 /renew 页，以 #resOk + Expires 时间差验收。
 
 过盾参数照抄 eooce（见技能 cf-managed-challenge“eooce 账号期过盾参数”一节）：
 整页盾 240s(+180s)/6s 节流/连续 2 轮判定、token 读取 JS、弹窗启发式、人形点击。
@@ -129,78 +128,6 @@ def send_telegram_notification(status, old_due, new_due, current_ip="未知"):
     except Exception as e:
         log(f"❌ Telegram 通知异常: {e}")
         return False
-
-# ================= HTTP 快捷路径（录制 API 形状） =================
-
-def _http_session():
-    s = requests.Session()
-    s.headers.update({"User-Agent": DEFAULT_UA})
-    if SESSION_COOKIE:
-        s.cookies.set("session", SESSION_COOKIE, domain="zero.acorehosting.com", path="/")
-    return s
-
-def _looks_like_cf_block(resp):
-    if resp.status_code == 403 and "cloudflare" in resp.headers.get("Server", "").lower():
-        return True
-    if "Just a moment" in resp.text[:5000] or "challenge-platform" in resp.text[:5000]:
-        return True
-    return False
-
-def http_dashboard_state():
-    """HTTP 读 dashboard。返回 (ok, renew_href, expire, remaining) truncated.
-
-    ok=False 表示被 CF 拦或会话失效，上层转浏览器。renew_href 为 None 表示
-    不可续（NOT_TIME）。"""
-    if not SESSION_COOKIE:
-        return False, None, "未知", "未知"
-    try:
-        s = _http_session()
-        r = s.get(DASHBOARD_URL, timeout=20, proxies=REQUESTS_PROXIES)
-        if _looks_like_cf_block(r):
-            log("ℹ️ HTTP 预检被 CF 拦截，转浏览器。")
-            return False, None, "未知", "未知"
-        if r.status_code != 200 or "server-card" not in r.text:
-            log(f"⚠️ HTTP dashboard 状态异常（{r.status_code}），疑似会话失效，转浏览器。")
-            return False, None, "未知", "未知"
-        html = r.text
-        m = re.search(r'href="(/renew\?id=([a-f0-9-]+))"', html)
-        renew_href = m.group(1) if m else None
-        e = re.search(r'Expires\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+UTC)', html, re.IGNORECASE)
-        expire = e.group(1).strip() if e else "未知"
-        t = re.search(r'class="time-remaining">\s*([^<]+?)\s*<', html)
-        remaining = t.group(1).strip() if t else "未知"
-        log(f"📅 HTTP 预检：expire={expire}，remaining={remaining}，"
-            f"renew_link={'有' if renew_href else '无（未到时间）'}")
-        return True, renew_href, expire, remaining
-    except Exception as e:
-        log(f"⚠️ HTTP 预检异常: {e}，转浏览器。")
-        return False, None, "未知", "未知"
-
-def http_confirm_renew(renew_href):
-    """HTTP 直接 POST /renew/confirm。成功返回 (True, expires_at)，否则 (False, None)。"""
-    if not SESSION_COOKIE or not renew_href:
-        return False, None
-    try:
-        s = _http_session()
-        # 录制：空 body POST，200 {"ok":true,"expires_at":"..."}（录制 id 仅示例，实跑用 dashboard 解析值）
-        r = s.post(f"{BASE_URL}{renew_href.replace('/renew?', '/renew/confirm?')}",
-                   timeout=20, proxies=REQUESTS_PROXIES)
-        if _looks_like_cf_block(r):
-            log("ℹ️ HTTP 确认被 CF 拦截，转浏览器。")
-            return False, None
-        try:
-            data = r.json()
-        except Exception:
-            log(f"⚠️ HTTP 确认返回非 JSON（{r.status_code}），转浏览器。")
-            return False, None
-        if data.get("ok") is True:
-            log(f"✅ HTTP 快捷续期成功：{data.get('expires_at')}")
-            return True, data.get("expires_at", "未知")
-        log(f"⚠️ HTTP 确认被拒：{str(data)[:200]}，转浏览器。")
-        return False, None
-    except Exception as e:
-        log(f"⚠️ HTTP 确认异常: {e}，转浏览器。")
-        return False, None
 
 # ================= 过盾核心（eooce 参数） =================
 
@@ -909,22 +836,7 @@ def main():
     current_ip = get_current_ip(PROXY_SERVER)
     log(f"🎯 当前出口IP: {current_ip}")
 
-    # ---- 第一步：HTTP 快捷路径（免浏览器） ----
-    if SESSION_COOKIE:
-        ok, renew_href, old_expire, old_remaining = http_dashboard_state()
-        if ok and renew_href is None:
-            log("⏳ 未到续期时间（HTTP 预检），本次免开浏览器")
-            send_telegram_notification("⏳ 未到续期时间", old_expire, old_expire, current_ip)
-            sys.exit(0)
-        if ok and renew_href:
-            log(f"📆 续期前：{old_expire}（{old_remaining}）")
-            success, new_expire = http_confirm_renew(renew_href)
-            if success:
-                send_telegram_notification("✅ 续期成功", old_expire, new_expire, current_ip)
-                sys.exit(0)
-            log("➡ HTTP 快捷路径未走通，转浏览器全流程")
-
-    # ---- 第二步：浏览器全流程 ----
+    # ---- 浏览器全流程（本站 CF 盾拦死裸请求，无 HTTP 快捷路径） ----
     with sync_playwright() as p:
         browser = None
         try:
