@@ -29,7 +29,7 @@ localStorage 注入免密登录，不过 hCaptcha）。
 TG 风格对齐上游 eooce 系。
 """
 
-import os,re,sys,time,random,requests
+import os,re,sys,time,random,requests,subprocess
 try:
     from patchright.sync_api import sync_playwright
     USING_PATCHRIGHT = True
@@ -689,6 +689,85 @@ def _discord_login(page):
             pass
         return False
 
+# ================= Cookie 自动写回 =================
+
+def extract_session_cookie(page):
+    """从浏览器上下文提取本站 session Cookie，取不到返回 None。"""
+    try:
+        for c in page.context.cookies():
+            if c.get("name") == "session" and "acorehosting" in (c.get("domain") or ""):
+                return c.get("value")
+    except Exception as e:
+        log(f"⚠️ 提取 session Cookie 失败: {e}")
+    return None
+
+def _mask_secret(v):
+    return (v[:8] + "****") if v and len(v) > 8 else "****"
+
+def _writeback_env_file(new_value):
+    """本地 .env 有则更新 SESSION_COOKIE 行（gitignored，不进仓库）。"""
+    try:
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        if not os.path.exists(env_path):
+            return False
+        with open(env_path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        updated, found = [], False
+        for line in lines:
+            if line.startswith("SESSION_COOKIE="):
+                updated.append("SESSION_COOKIE=" + new_value)
+                found = True
+            else:
+                updated.append(line)
+        if not found:
+            updated.append("SESSION_COOKIE=" + new_value)
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(updated) + "\n")
+        log("✅ 本地 .env 的 SESSION_COOKIE 已更新")
+        return True
+    except Exception as e:
+        log(f"⚠️ 写回本地 .env 失败: {e}")
+        return False
+
+def _writeback_gh_secret(new_value):
+    """CI 内 via gh 把新 Cookie 写回仓库 Secrets。失败只告警，不影响本次结果。"""
+    gh_token = os.environ.get("GH_TOKEN") or ""
+    repo = os.environ.get("GITHUB_REPOSITORY") or ""
+    if not gh_token or not repo:
+        return False
+    try:
+        proc = subprocess.run(
+            ["gh", "secret", "set", "SESSION_COOKIE", "--repo", repo, "--body", new_value],
+            env={**os.environ, "GH_TOKEN": gh_token},
+            timeout=30, capture_output=True, text=True,
+        )
+        if proc.returncode == 0:
+            log("✅ 仓库 SESSION_COOKIE 已 via gh 写回")
+            return True
+        log(f"⚠️ gh 写回失败: {(proc.stderr or proc.stdout or '')[:200]}")
+        return False
+    except FileNotFoundError:
+        log("⚠️ 未安装 gh，跳过 Secrets 写回")
+        return False
+    except Exception as e:
+        log(f"⚠️ gh 写回异常: {e}")
+        return False
+
+def maybe_writeback_session(page):
+    """登录成功后：新 Cookie 与当前不同才写回（本地 .env + 仓库 Secrets）。"""
+    try:
+        new_value = extract_session_cookie(page)
+        if not new_value:
+            return
+        if SESSION_COOKIE and new_value == SESSION_COOKIE:
+            log("ℹ️ session Cookie 无变化，跳过写回")
+            return
+        log(f"🔄 session Cookie 已更新（{_mask_secret(new_value)}），开始写回...")
+        _writeback_env_file(new_value)
+        _writeback_gh_secret(new_value)
+    except Exception as e:
+        log(f"⚠️ Cookie 写回流程异常（不影响本次结果）: {e}")
+
 # ================= dashboard 读取 =================
 
 def get_renew_href(page):
@@ -855,6 +934,9 @@ def main():
             if not login(page):
                 send_telegram_notification("❌ 登录失败", "未知", "未知", current_ip)
                 sys.exit(1)
+
+            # 登录成功后：新 Cookie 写回（本地 .env + 仓库 Secrets）
+            maybe_writeback_session(page)
 
             old_expire = get_expire_time(page)
             old_remaining = get_time_remaining(page)
